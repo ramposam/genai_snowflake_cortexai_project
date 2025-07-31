@@ -27,10 +27,14 @@ st.session_state.form_data["file_mode"] = st.selectbox("Choose Mode",["OCR","LAY
 
 st.session_state.form_data["split_type"] = st.selectbox("Split chunks by Type",["Text","Markdown"])
 
-st.session_state.form_data["no_of_chunks"] = st.number_input("No of chunks",max_value=10,min_value=3)
+st.session_state.form_data["chunk_size"] = st.number_input("Size of each chunk",max_value=1500,min_value=200,step=100)
+st.session_state.form_data["overlap"] = st.number_input("Overlap",max_value=150,min_value=20,step=10)
 
 st.session_state.form_data["reprocess_file"] = st.checkbox("Would you like to re-process file?",value=False)
-st.session_state.form_data["vector_type"] = st.selectbox("Vector Search Function",["VECTOR_INNER_PRODUCT" , "VECTOR_L1_DISTANCE" , "VECTOR_L2_DISTANCE" , "VECTOR_COSINE_SIMILARITY"])
+st.session_state.form_data["embedding_model"] = st.selectbox("Vector Search Function",["e5-base-v2" , "snowflake-arctic-embed-m" , "snowflake-arctic-embed-m-v1.5"])
+
+st.session_state.form_data["vector_search_type"] = st.selectbox("Vector Search Function",["VECTOR_INNER_PRODUCT" , "VECTOR_L1_DISTANCE" , "VECTOR_L2_DISTANCE" , "VECTOR_COSINE_SIMILARITY"])
+st.session_state.form_data["no_of_chunks"] = st.number_input("No of chunks Use for Context",max_value=10,min_value=3)
 
 
 # --- Step 3: Upload Button ---
@@ -178,8 +182,8 @@ if form_data["upload_clicked"] and form_data["file"] :
                    LATERAL FLATTEN( input => SNOWFLAKE.CORTEX.SPLIT_TEXT_RECURSIVE_CHARACTER (
                       file_content::text,
                       'markdown',
-                      200,
-                      20,
+                      {form_data["chunk_size"]},
+                      {form_data["overlap"]},
                       ['##']
                    )) c;
             """
@@ -193,8 +197,8 @@ if form_data["upload_clicked"] and form_data["file"] :
                LATERAL FLATTEN( input => SNOWFLAKE.CORTEX.SPLIT_TEXT_MARKDOWN_HEADER (
                   file_content::text,
                   OBJECT_CONSTRUCT('#', 'header_1', '##', 'header_2','###', 'header_3'),
-                  200,
-                  20
+                  {form_data["chunk_size"]},
+                  {form_data["overlap"]},
                )) c;
             """
         st.code(chunk_sql)
@@ -204,7 +208,7 @@ if form_data["upload_clicked"] and form_data["file"] :
         # Embed Chunks
         embed_sql = f""" INSERT INTO   {db}.{schema}.{embedding_table}
         SELECT DOCUMENT_ID,CHUNK_ID,
-          SNOWFLAKE.CORTEX.EMBED_TEXT_768('snowflake-arctic-embed-m-v1.5', CHUNK_DATA) AS embedding,
+          SNOWFLAKE.CORTEX.EMBED_TEXT_768('{form_data["embedding_model"]}', CHUNK_DATA) AS embedding,
           current_timestamp() as updated_date, current_user() as updated_by
         FROM {db}.{schema}.{chunks_table}
          WHERE  document_id = {document_id} ; 
@@ -228,78 +232,79 @@ if  form_data["file"]:
     search_clicked = st.button("Search")
 
     if search_clicked and user_question:
-        context_select = "listagg(PARSE_JSON (chunk_data)['chunk']||chr(13)||chr(13),'\n')" if form_data["split_type"] == "Markdown" else "listagg(chunk_data||chr(13)||chr(13),'\n')"
-        # Embed Question
-        rag_query = f""" with question as 
-            (select SNOWFLAKE.CORTEX.EMBED_TEXT_768( 'snowflake-arctic-embed-m-v1.5', '{user_question}' ) as q_embeddings),
-            doc_details as (select document_id from {db}.{schema}.{document_table} 
-                where file_name = '{file_name}' 
-                and file_mode = '{form_data["file_mode"]}' order by document_id desc limit 1),
-        vectors as (
-            select chunk_data,
-                {st.session_state.form_data["vector_type"]}(embeddings,question.q_embeddings) as similarity_range  
-            from doc_details d
-            join {db}.{schema}.{embedding_table} e on (d.document_id = e.document_id)
-            join {db}.{schema}.{chunks_table} c on (e.document_id=c.document_id and e.chunk_id = c.chunk_id)
-            join question on (1=1) 
-            order by similarity_range desc limit {form_data["no_of_chunks"]})
-        select {context_select} as context from vectors ;  
-        """
-        st.subheader("Actual Prompt")
-        st.code(rag_query)
-        cs.execute(rag_query)
-        rag_context = cs.fetchone()[0]
-        # Prepare prompt
-        final_prompt = f""" with prompt_gen as (
-            select '
-    You are a documentation specialist focused on providing precise answers based on provided documentation. 
-    
-            Input Context:
-            Context:  {rag_context}
-            Question: {user_question}
-    
-            Instructions:
-            1. Analyze the provided context carefully
-            2. Frame responses to build upon any relevant chat history
-            3. Structure answers as follows:
-               - Direct answer to the question
-               - Required prerequisites or dependencies
-               - Step-by-step implementation (if applicable)
-               - Important limitations or warnings
-    
-            If information is not found in context:
-            1. Explicitly state what information is missing
-            2. Avoid assumptions or external references
-            3. Specify what additional context would help answer the question
-    
-            Remember: Only reference information from the provided context.
-    
-            Response: 
-                    ' as prompt)
-            select prompt,snowflake.cortex.complete(      
-                  '{form_data["model"]}',
-                    [
+        with st.spinner("Please wait .. Fetching Matched Context and Generating Answer for you."):
+            context_select = "listagg(PARSE_JSON (chunk_data)['chunk']||chr(13)||chr(13),'\n')" if form_data["split_type"] == "Markdown" else "listagg(chunk_data||chr(13)||chr(13),'\n')"
+            # Embed Question
+            rag_query = f""" with question as 
+                (select SNOWFLAKE.CORTEX.EMBED_TEXT_768( '{form_data["embedding_model"]}', '{user_question}' ) as q_embeddings),
+                doc_details as (select document_id from {db}.{schema}.{document_table} 
+                    where file_name = '{file_name}' 
+                    and file_mode = '{form_data["file_mode"]}' order by document_id desc limit 1),
+            vectors as (
+                select chunk_data,
+                    {st.session_state.form_data["vector_search_type"]}(embeddings,question.q_embeddings) as similarity_range  
+                from doc_details d
+                join {db}.{schema}.{embedding_table} e on (d.document_id = e.document_id)
+                join {db}.{schema}.{chunks_table} c on (e.document_id=c.document_id and e.chunk_id = c.chunk_id)
+                join question on (1=1) 
+                order by similarity_range desc limit {form_data["no_of_chunks"]})
+            select {context_select} as context from vectors ;  
+            """
+            st.subheader("Actual Prompt")
+            st.code(rag_query)
+            cs.execute(rag_query)
+            rag_context = cs.fetchone()[0]
+            # Prepare prompt
+            final_prompt = f""" with prompt_gen as (
+                select '
+        You are a documentation specialist focused on providing precise answers based on provided documentation. 
+        
+                Input Context:
+                Context:  {rag_context}
+                Question: {user_question}
+        
+                Instructions:
+                1. Analyze the provided context carefully
+                2. Frame responses to build upon any relevant chat history
+                3. Structure answers as follows:
+                   - Direct answer to the question
+                   - Required prerequisites or dependencies
+                   - Step-by-step implementation (if applicable)
+                   - Important limitations or warnings
+        
+                If information is not found in context:
+                1. Explicitly state what information is missing
+                2. Avoid assumptions or external references
+                3. Specify what additional context would help answer the question
+        
+                Remember: Only reference information from the provided context.
+        
+                Response: 
+                        ' as prompt)
+                select prompt,snowflake.cortex.complete(      
+                      '{form_data["model"]}',
+                        [
+                            {{
+                                'role': 'user',
+                                'content': prompt
+                            }}
+                        ],
                         {{
-                            'role': 'user',
-                            'content': prompt
-                        }}
-                    ],
-                    {{
-                    'temperature': 0.7,
-                    'max_tokens': 500
-            }})['choices'][0]['messages']::text as response
-            from prompt_gen; 
-"""
-        st.subheader("Prompt Query")
-        st.code(final_prompt)
-        # Get response
-        cs.execute(final_prompt)
-        result = cs.fetchall()
-        prompt = result[0][0]
-        response = result[0][1]
+                        'temperature': 0.7,
+                        'max_tokens': 500
+                }})['choices'][0]['messages']::text as response
+                from prompt_gen; 
+    """
+            st.subheader("Prompt Query")
+            st.code(final_prompt)
+            # Get response
+            cs.execute(final_prompt)
+            result = cs.fetchall()
+            prompt = result[0][0]
+            response = result[0][1]
 
-        st.subheader("Actual Prompt")
-        st.code(prompt)
+            st.subheader("Actual Prompt")
+            st.code(prompt)
 
-        st.subheader("Response/Answer")
-        st.code(response)
+            st.subheader("Response/Answer")
+            st.code(response)
