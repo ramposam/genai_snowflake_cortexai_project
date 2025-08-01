@@ -1,3 +1,38 @@
+create TABLE if not exists  CORTEX_AI_DB.CORTEX_AI.T_DOCUMENTS (
+	DOCUMENT_ID NUMBER(1,0),
+	FILE_NAME VARCHAR(16777216),
+	FILE_CONTENT TEXT,
+	NO_OF_PAGES TEXT,
+	FILE_MODE TEXT,
+	UPDATED_DATE TIMESTAMP_LTZ(9),
+	UPDATED_BY VARCHAR(16777216)
+    );
+
+ -- create snowflake internal stage
+ CREATE STAGE  IF NOT EXISTS CORTEX_AI_DB.CORTEX_AI.STG_DOCUMENTS
+	DIRECTORY = ( ENABLE = true )
+	ENCRYPTION = ( TYPE = 'SNOWFLAKE_SSE' ) ;
+
+ -- Load file to snowflake internal stage
+ PUT 'file:///tmp/69802168-Air-India-Ahmedabad-Crash-AAIB-preliminary-report.pdf' @CORTEX_AI_DB.CORTEX_AI.STG_DOCUMENTS AUTO_COMPRESS=FALSE ;
+
+ -- load into table
+  INSERT INTO  CORTEX_AI_DB.CORTEX_AI.T_DOCUMENTS
+        with tab as (
+        SELECT '69802168-Air-India-Ahmedabad-Crash-AAIB-preliminary-report.pdf' as file_name,
+            SNOWFLAKE.CORTEX.PARSE_DOCUMENT (
+            @CORTEX_AI_DB.CORTEX_AI.STG_DOCUMENTS,
+            '69802168-Air-India-Ahmedabad-Crash-AAIB-preliminary-report.pdf',
+            {'mode': 'LAYOUT'} )  AS document_data)
+            select 8  as document_id,
+            file_name,document_data['content']::TEXT file_content,
+            document_data['metadata']['pageCount']::TEXT no_of_pages,
+            'LAYOUT' as file_mode,
+            current_timestamp() as updated_date, current_user() as updated_by
+            from tab  ;
+
+
+
 set prompt1 = 'I would like to fine tune one of base model llama-8b with following document data using snowflake cortex ai. I want you to analyze the document and suggest me some prompts and it''s result to fine tune model using snowflake.cortex.finetune.
 
 This document has details of Vote Share and Margin of Victory of Winners Andhra Pradesh Assembly 2024. So, it''s all about election result , try to identify no constituencies, each constituent contested candidates, there win, votes, percentage, etc.';

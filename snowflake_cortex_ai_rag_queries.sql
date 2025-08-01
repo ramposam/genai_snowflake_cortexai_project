@@ -14,8 +14,22 @@ create TABLE if not exists  CORTEX_AI_DB.CORTEX_AI.T_DOCUMENTS (
 	ENCRYPTION = ( TYPE = 'SNOWFLAKE_SSE' ) ;
  
  
- PUT 'file:///tmp/pdf_fiile.pdf' @CORTEX_AI_DB.CORTEX_AI.STG_DOCUMENTS AUTO_COMPRESS=FALSE ;
- 
+ PUT 'file:///tmp/69802168-Air-India-Ahmedabad-Crash-AAIB-preliminary-report.pdf' @CORTEX_AI_DB.CORTEX_AI.STG_DOCUMENTS AUTO_COMPRESS=FALSE ;
+
+  INSERT INTO  CORTEX_AI_DB.CORTEX_AI.T_DOCUMENTS
+        with tab as (
+        SELECT '69802168-Air-India-Ahmedabad-Crash-AAIB-preliminary-report.pdf' as file_name,
+            SNOWFLAKE.CORTEX.PARSE_DOCUMENT (
+            @CORTEX_AI_DB.CORTEX_AI.STG_DOCUMENTS,
+            '69802168-Air-India-Ahmedabad-Crash-AAIB-preliminary-report.pdf',
+            {'mode': 'LAYOUT'} )  AS document_data)
+            select 8  as document_id,
+            file_name,document_data['content']::TEXT file_content,
+            document_data['metadata']['pageCount']::TEXT no_of_pages,
+            'LAYOUT' as file_mode,
+            current_timestamp() as updated_date, current_user() as updated_by
+            from tab  ;
+
  
  CREATE  TABLE IF NOT EXISTS CORTEX_AI_DB.CORTEX_AI.T_DOCUMENT_CHUNKS (
                DOCUMENT_ID NUMBER(1,0),
